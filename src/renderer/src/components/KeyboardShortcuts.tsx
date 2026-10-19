@@ -617,6 +617,10 @@ const KeyboardShortcuts = memo(({
         name: t('Decimate video'),
         category: outputCategory,
       },
+      renameCurrentFile: {
+        name: t('Rename file'),
+        category: otherCategory,
+      },
 
       // batchFilesCategory
       batchPreviousFile: {

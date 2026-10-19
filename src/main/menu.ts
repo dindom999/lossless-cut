@@ -14,11 +14,12 @@ const esc = (val: string) => val.replaceAll('&', '&&');
 
 const { Menu } = electron;
 
-export default ({ app, mainWindow, newVersion, isStoreBuild, openExternal }: {
+export default ({ app, mainWindow, newVersion, isStoreBuild, isFileOpened, openExternal }: {
   app: Electron.App,
   mainWindow: BrowserWindow,
   newVersion?: string | undefined,
   isStoreBuild: boolean,
+  isFileOpened: boolean,
   openExternal: (url: string) => void,
 }) => {
   // todo TS mainWindow.webContents.send
@@ -209,6 +210,15 @@ export default ({ app, mainWindow, newVersion, isStoreBuild, openExternal }: {
           label: esc(t('Decimate video')),
           click() {
             mainWindow.webContents.send('decimate');
+          },
+        },
+        {
+          // Only meaningful for the open media file, so it is disabled until one is loaded.
+          // The renderer tells us when that changes (see `setIsFileOpened`).
+          label: esc(t('Rename...')),
+          enabled: isFileOpened,
+          click() {
+            mainWindow.webContents.send('renameCurrentFile');
           },
         },
         { type: 'separator' },

@@ -74,6 +74,9 @@ let mainWindow: BrowserWindow | null;
 let askBeforeClose = false;
 let rendererReady = false;
 let newVersion: string | undefined;
+// Whether a media file is open in the renderer. Menu items that only make sense for the open file are
+// disabled until one is loaded, and the menu has to be rebuilt for `enabled` to take effect.
+let isFileOpened = false;
 
 const openFiles = (paths: string[]) => mainWindow!.webContents.send('openFiles', paths);
 
@@ -240,7 +243,7 @@ async function openExternal(url: string) {
 
 function updateMenu() {
   assert(mainWindow);
-  menu({ app, mainWindow, newVersion, isStoreBuild, openExternal });
+  menu({ app, mainWindow, newVersion, isStoreBuild, isFileOpened, openExternal });
 }
 
 async function changeLanguage(language: string | null) {
@@ -370,6 +373,12 @@ async function init() {
 
     ipcMain.on('setAskBeforeClose', (_e, val) => {
       askBeforeClose = val;
+    });
+
+    ipcMain.on('setIsFileOpened', (_e, val) => {
+      if (isFileOpened === val) return;
+      isFileOpened = val;
+      updateMenu();
     });
 
     ipcMain.on('setLanguage', (_e, newLanguage) => changeLanguage(newLanguage));

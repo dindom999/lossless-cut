@@ -15,7 +15,7 @@ import { UserFacingError } from '../errors';
 import type { FFprobeFormat } from '../../common/ffprobe';
 
 const { dirname, parse: parsePath, join, extname, isAbsolute, resolve, basename } = window.require('node:path');
-const { stat, lstat, readdir, utimes, unlink, open, access, constants: { R_OK, W_OK } } = window.require('node:fs/promises');
+const { stat, lstat, readdir, utimes, unlink, open, access, rename, constants: { R_OK, W_OK } } = window.require('node:fs/promises');
 const remote = window.require('@electron/remote');
 const { app } = remote;
 const { isWindows, isMac } = remote.require('./index.js');
@@ -139,6 +139,9 @@ export async function fsOperationWithRetry<T>(operation: () => Promise<T>, { sig
 export const unlinkWithRetry = async (path: string, options?: Options) => fsOperationWithRetry(async () => unlink(path), { ...options, onFailedAttempt: ({ attemptNumber, error }) => console.warn('Retrying delete', path, attemptNumber, error.message) });
 // example error: index-18074aaf.js:160 Error: EPERM: operation not permitted, utime 'C:\Users\USERNAME\Desktop\RC\New folder\2023-12-27 21-45-22 (GMT p5)-merged-1703933052361-cut-merged-1703933070237.mp4'
 export const utimesWithRetry = async (path: string, atime: number, mtime: number, options?: Options) => fsOperationWithRetry(async () => utimes(path, atime, mtime), { ...options, onFailedAttempt: ({ attemptNumber, error }) => console.warn('Retrying utimes', path, attemptNumber, error.message) });
+// Windows holds a lock on the media file while it is playing (the <video> element and any ffmpeg child
+// process keep a handle open), so a rename can transiently fail with EPERM/EBUSY
+export const renameWithRetry = async (fromPath: string, toPath: string) => fsOperationWithRetry(async () => rename(fromPath, toPath), { onFailedAttempt: ({ attemptNumber, error }) => console.warn('Retrying rename', fromPath, attemptNumber, error.message) });
 
 export const getFrameDuration = (fps?: number) => 1 / (fps ?? 30);
 
@@ -335,6 +338,10 @@ export function escapeRegExp(str: string) {
 }
 
 export const readFileStats = async (path: string) => stat(path);
+
+export async function fileExists(path: string) {
+  return access(path).then(() => true, () => false);
+}
 
 export const readFileSize = async (path: string) => (await readFileStats(path)).size;
 

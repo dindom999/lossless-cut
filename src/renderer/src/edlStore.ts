@@ -9,6 +9,7 @@ import { getOutPath } from './util';
 import type { EdlExportType, EdlFileType, EdlImportType, GetFrameCount, LlcProject, SegmentBase, StateSegment } from './types';
 import { llcProjectV1Schema, llcProjectV2Schema } from './types';
 import { mapSaveableSegments } from './segments';
+import { renameLlcProjectMediaFileName } from '../../common/renameFile.js';
 import isDev from './isDev';
 
 const { readFile, writeFile } = window.require('node:fs/promises');
@@ -124,6 +125,20 @@ export async function loadLlcProject(path: string) {
   console.log(`Loaded LLC project v${project.version}, mediaFileName: ${project.mediaFileName}, ${project.cutSegments.length} segments`);
   if (isDev) console.log(project);
   return project;
+}
+
+/**
+ * Point a project file at a renamed media file, in place.
+ *
+ * A project file records the media file by base name only and resolves it against its own directory, so a
+ * renamed media file leaves the project file describing something that no longer exists. Rewriting the
+ * field is what keeps the project loadable. See `GLOSSARY.md` under "Project file".
+ */
+export async function rewriteLlcProjectMediaFileName(path: string, newMediaFileName: string) {
+  const project = await loadLlcProject(path);
+  if (project.mediaFileName == null) return;
+  await writeFile(path, JSON5.stringify(renameLlcProjectMediaFileName(project, newMediaFileName), null, 2));
+  console.log('Rewrote mediaFileName in project file', path, '->', newMediaFileName);
 }
 
 export async function loadOtio(path: string) {

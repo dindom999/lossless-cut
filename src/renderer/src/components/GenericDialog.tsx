@@ -11,6 +11,8 @@ import { DialogButton } from './Button';
 import { showItemInFolder } from '../util';
 import type { CleanupChoice, CleanupChoicesType } from '../dialogs';
 import { ListItem, Notices, OutputIncorrectSeeHelpMenu, UnorderedList, Warnings } from '../dialogs';
+import { validateNewBaseName } from '../../../common/renameFile.js';
+import type { NewBaseNameProblem } from '../../../common/renameFile.js';
 import Checkbox from './Checkbox';
 import { saveColor, warningColor } from '../colors';
 
@@ -376,6 +378,70 @@ export function useDialog() {
     });
   }), [showGenericDialog, t]);
 
+  const openRenameFileDialog = useCallback(({ currentBaseName, currentFileName, isWindows, isMac }: {
+    currentBaseName: string,
+    currentFileName: string,
+    isWindows: boolean,
+    isMac: boolean,
+  }) => new Promise<string | undefined>((resolve) => {
+    function RenameFileDialog() {
+      const { onOpenChange } = useGenericDialogContext();
+      // The extension is locked: a rename cannot change it, so we only edit the base name
+      const [baseName, setBaseName] = useState(currentBaseName);
+
+      const problem = validateNewBaseName({ newBaseName: baseName, currentBaseName, isWindows, isMac });
+      const problemMessages: Record<NewBaseNameProblem, string> = {
+        empty: t('The name cannot be empty'),
+        sameAsCurrent: t('This is already the current name'),
+        invalidChars: t('The name contains characters that are not allowed in file names'),
+        trailingDotOrWhitespace: t('The name cannot end with a dot or a space'),
+        tooLong: t('The name is too long'),
+        reservedName: t('This is a reserved name on Windows'),
+      };
+      const problemMessage = problem != null ? problemMessages[problem] : undefined;
+
+      const handleSubmit = useCallback<FormEventHandler<HTMLFormElement>>((e) => {
+        e.preventDefault();
+        if (problemMessage != null) return;
+        resolve(baseName);
+        onOpenChange(false);
+      }, [baseName, problemMessage, onOpenChange]);
+
+      return (
+        <Dialog.Content aria-describedby={undefined} style={{ width: '50vw' }}>
+          <Dialog.Title>{t('Rename file')}</Dialog.Title>
+
+          <Dialog.Description>
+            {t('This renames the file on disk from {{currentFileName}} to the name below, keeping its extension. Your project file will be renamed to match, and future exports will use the new name.', { currentFileName })}
+          </Dialog.Description>
+
+          <form onSubmit={handleSubmit}>
+            {/* eslint-disable-next-line jsx-a11y/label-has-associated-control */}
+            <label style={{ display: 'block', marginBottom: '.5em' }}>
+              {t('New name (without the extension)')}<br />
+              <TextField.Root value={baseName} autoFocus onChange={(e) => setBaseName(e.target.value)} />
+            </label>
+
+            {problemMessage != null && <div style={{ color: 'var(--red-9)', marginBottom: '.5em' }}>{problemMessage}</div>}
+
+            <Dialog.ButtonRow>
+              <Dialog.Close asChild>
+                <DialogButton>{t('Cancel')}</DialogButton>
+              </Dialog.Close>
+
+              <DialogButton type="submit" primary disabled={problemMessage != null}>{t('Rename')}</DialogButton>
+            </Dialog.ButtonRow>
+          </form>
+        </Dialog.Content>
+      );
+    }
+
+    showGenericDialog({
+      render: () => <RenameFileDialog />,
+      onClose: () => resolve(undefined),
+    });
+  }), [showGenericDialog, t]);
+
   const openDecimateDialog = useCallback(() => new Promise<{ n: number, fps: number } | undefined>((resolve) => {
     function DecimateDialog() {
       const { onOpenChange } = useGenericDialogContext();
@@ -443,6 +509,7 @@ export function useDialog() {
     openCleanupFilesDialog,
     openShiftSegmentsDialog,
     openDecimateDialog,
+    openRenameFileDialog,
   };
 }
 

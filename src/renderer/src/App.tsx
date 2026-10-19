@@ -63,9 +63,11 @@ import {
   RefuseOverwriteError, extractSubtitleTrackToSegments,
   mapRecommendedDefaultFormat,
   getFfCommandLine,
+  abortFfmpegs,
 } from './ffmpeg';
 import { shouldCopyStreamByDefault, getAudioStreams, getRealVideoStreams, isAudioDefinitelyNotSupported, willPlayerProperlyHandleVideo, doesPlayerSupportHevcPlayback, getSubtitleStreams, enableVideoTrack, enableAudioTrack, canHtml5PlayerPlayStreams, isMatroska } from './util/streams';
-import { exportEdlFile, readEdlFile, loadLlcProject, askForEdlImport } from './edlStore';
+import { exportEdlFile, readEdlFile, loadLlcProject, askForEdlImport, saveLlcProject, rewriteLlcProjectMediaFileName } from './edlStore';
+import { getRenamedFileName, getRenamedProjectFileName } from '../../common/renameFile.js';
 import { formatYouTube, getFrameCountRaw, formatTsvHuman } from './edlFormats';
 import {
   getOutPath, getOutDir,
@@ -85,6 +87,10 @@ import {
   getSuffixedOutPath,
   calculateTimelinePercent,
   getFileDir,
+  renameWithRetry,
+  fileExists,
+  isWindows,
+  isMac,
 } from './util';
 import getSwal, { errorToast, showPlaybackFailedMessage } from './swal';
 import { adjustRate } from './util/rate-calculator';
@@ -127,7 +133,7 @@ import { appName } from '../../main/common.js';
 
 const { ipcRenderer, webUtils } = window.require('electron');
 const { lstat } = window.require('node:fs/promises');
-const { parse: parsePath, join: pathJoin, basename, dirname } = window.require('node:path');
+const { parse: parsePath, join: pathJoin, basename, dirname, extname } = window.require('node:path');
 const { hasDisabledNetworking, pathToFileURL, lossyMode, isLinux } = window.require('@electron/remote').require('./index.js');
 
 
@@ -166,6 +172,10 @@ function App() {
   const [cacheBuster, setCacheBuster] = useState(0);
   const [currentFileExportCount, setCurrentFileExportCount] = useState(0);
 
+  // A playback position to restore once the <video> element has metadata for the newly loaded file.
+  // Seeking before that silently clamps to 0, so it has to wait for `onLoadedMetadata`.
+  const pendingSeekRef = useRef<number | undefined>(undefined);
+
   const { fileFormat, setFileFormat, detectedFileFormat, setDetectedFileFormat, isCustomFormatSelected } = useFileFormatState();
 
   // State per application launch
@@ -199,7 +209,7 @@ function App() {
 
   const { withErrorHandling, handleError, genericError, setGenericError } = useErrorHandling();
 
-  const { showGenericDialog, genericDialog, closeGenericDialog, confirmDialog, openExportFinishedDialog, openCutFinishedDialog, openConcatFinishedDialog, openCleanupFilesDialog, openShiftSegmentsDialog, openDecimateDialog } = useDialog();
+  const { showGenericDialog, genericDialog, closeGenericDialog, confirmDialog, openExportFinishedDialog, openCutFinishedDialog, openConcatFinishedDialog, openCleanupFilesDialog, openShiftSegmentsDialog, openDecimateDialog, openRenameFileDialog } = useDialog();
 
   // Note that each action may be multiple key bindings and this will only be the first binding for each action
   const keyBindingByAction = useMemo(() => Object.fromEntries(keyBindings.map((binding) => [binding.action, binding])), [keyBindings]);
@@ -371,6 +381,14 @@ function App() {
       maybeCreateFullLengthSegment(durationNew);
     }
   }, [maybeCreateFullLengthSegment]);
+
+  const onLoadedMetadata = useCallback<ReactEventHandler<HTMLVideoElement>>((e) => {
+    const pendingSeek = pendingSeekRef.current;
+    if (pendingSeek == null) return;
+    pendingSeekRef.current = undefined;
+    // Only now is the duration known, so this is the first point where the seek can land
+    e.currentTarget.currentTime = Math.min(pendingSeek, e.currentTarget.duration || pendingSeek);
+  }, []);
 
   const segmentsAtCursor = useMemo(() => findSegmentsAtCursor(commandedTime).map((index) => cutSegments[index]), [commandedTime, cutSegments, findSegmentsAtCursor]);
   const firstSegmentAtCursor = useMemo(() => segmentsAtCursor[0], [segmentsAtCursor]);
@@ -1779,6 +1797,99 @@ function App() {
     });
   }, [checkFileOpened, decimate, openDecimateDialog, runAndReloadFile]);
 
+  // Renaming is not just an `fs.rename`. Two things make it more than that:
+  //
+  //  - A project file records the media file by base name and resolves it against its own directory, so
+  //    every project file for this media file has to move and rewrite that field, or it is left
+  //    describing a file that no longer exists. See `GLOSSARY.md` under "Project file".
+  //  - Windows locks the file while the `<video>` element and any ffmpeg child process hold it open, so
+  //    the rename goes through the same close/reopen cycle as any other file load. That resets the
+  //    in-memory cut segments, so they are written out first and read back by the reopen.
+  const renameCurrentFile = useCallback(async () => {
+    if (!checkFileOpened() || workingRef.current) return;
+    invariant(filePath != null);
+
+    const currentBaseName = parsePath(filePath).name;
+    const newBaseName = await openRenameFileDialog({ currentBaseName, currentFileName: basename(filePath), isWindows, isMac });
+    if (newBaseName == null) return;
+
+    const newFileName = getRenamedFileName({ newBaseName, ext: extname(filePath) });
+    const newFilePath = pathJoin(dirname(filePath), newFileName);
+
+    if (await fileExists(newFilePath)) {
+      errorToast(i18n.t('A file with that name already exists'));
+      return;
+    }
+
+    // The user may have project files in either location depending on `storeProjectInWorkingDir`, and
+    // could have leftovers from having switched that setting, so consider both.
+    const oldProjectFilePaths = [getProjectFileSavePath(false), getProjectFileSavePath(true)]
+      .filter((p, i, all): p is string => p != null && all.indexOf(p) === i);
+
+    // The renamed project file goes where the old one was, so that a project file in the working
+    // directory stays in the working directory.
+    const renameProjectFilePath = (oldProjectFilePath: string) => pathJoin(dirname(oldProjectFilePath), getRenamedProjectFileName({ projectFileName: basename(oldProjectFilePath), currentBaseName, newBaseName }));
+
+    // Where the segments get written before the reload. Reusing the source-dir project location keeps
+    // this consistent with where `getProjectFileSavePath` would put it next time around.
+    const [sourceDirProjectFilePath] = oldProjectFilePaths;
+    invariant(sourceDirProjectFilePath != null);
+    const newProjectFilePath = renameProjectFilePath(sourceDirProjectFilePath);
+
+    // Remember where the user was, since the reload below resets the video
+    const timeBeforeRename = getRelevantTime();
+    let renamed = false;
+
+    try {
+      setWorking({ text: i18n.t('Renaming file') });
+
+      // Release the file before asking the OS to move it. The <video> element and the ffmpeg process
+      // that feeds it both hold a handle open, and Windows refuses to rename a file that is open.
+      // Unloading the element is the same dance its own src effect does on cleanup, and abortFfmpegs
+      // stops the compat player feeding it.
+      const video = videoRef.current;
+      if (video) {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      }
+      await abortFfmpegs();
+      // Give the aborted ffmpeg process a moment to actually release its handle
+      await new Promise((resolve) => { setTimeout(resolve, 100); });
+
+      await withErrorHandling(async () => {
+        // Persist the segments before the reload resets them. This happens even when auto-save is
+        // off, because silently losing the user's cuts would be far worse than leaving behind a project
+        // file they didn't ask for.
+        if (cutSegments.length > 0) await saveLlcProject({ savePath: newProjectFilePath, mediaFilePath: newFilePath, cutSegments });
+
+        await renameWithRetry(filePath, newFilePath);
+
+        for (const oldProjectFilePath of oldProjectFilePaths) {
+          // Skip the one we just wrote, and any that don't exist — the user may have segments stored
+          // in only one of the two locations, or none at all.
+          if (oldProjectFilePath !== sourceDirProjectFilePath && await fileExists(oldProjectFilePath)) {
+            await rewriteLlcProjectMediaFileName(oldProjectFilePath, newFileName);
+            await renameWithRetry(oldProjectFilePath, renameProjectFilePath(oldProjectFilePath));
+          }
+        }
+
+        // `projectPath` is what makes loadMedia read the cut segments back out of the project file. Only
+        // pass it when there is one: a path to a project file that doesn't exist would fail the load.
+        await loadMedia({ filePath: newFilePath, projectPath: await fileExists(newProjectFilePath) ? newProjectFilePath : undefined });
+
+        renamed = true;
+        showNotification({ icon: 'info', text: i18n.t('Renamed to {{newFileName}}', { newFileName }) });
+      }, i18n.t('Failed to rename file'));
+    } finally {
+      setWorking(undefined);
+    }
+
+    // Seeking has to wait for the new file's metadata, so hand the position over rather than seeking
+    // now. Only when the rename actually happened — otherwise the next file to load would be seeked.
+    if (renamed) pendingSeekRef.current = timeBeforeRename;
+  }, [checkFileOpened, workingRef, filePath, openRenameFileDialog, getProjectFileSavePath, cutSegments, withErrorHandling, loadMedia, getRelevantTime, showNotification, setWorking, videoRef]);
+
   const addStreamSourceFile = useCallback(async (path: string) => {
     if (allFilesMeta[path]) return undefined; // Already added?
     const fileMeta = await readFileFfprobeMeta(path);
@@ -2149,6 +2260,7 @@ function App() {
       convertFormatCurrentFile: () => userHtml5ifyCurrentFile(),
       convertFormatBatch,
       concatBatch,
+      renameCurrentFile,
       toggleKeyframeCutMode: () => toggleKeyframeCut(true),
       toggleCaptureFormat,
       toggleStripAudio,
@@ -2206,7 +2318,7 @@ function App() {
     };
 
     return ret;
-  }, [togglePlaySelectedSegments, toggleLoopSelectedSegments, pause, timelineToggleComfortZoom, captureSnapshot, captureSnapshotAsCoverArt, captureSnapshotToClipboard, setCutStart, setCutEnd, cleanupFilesDialog, splitCurrentSegment, focusSegmentAtCursor, selectSegmentsAtCursor, increaseRotation, jumpCutStart, jumpCutEnd, jumpTimelineStart, jumpTimelineEnd, batchOpenSelectedFile, closeBatch, addSegment, duplicateCurrentSegment, toggleLastCommands, extractCurrentSegmentFramesAsImages, extractSelectedSegmentsFramesAsImages, reorderSegsByStartTime, invertAllSegments, fillSegmentsGaps, combineOverlappingSegments, combineSelectedSegments, createFixedDurationSegments, createNumSegments, createFixedByteSizedSegments, createRandomSegments, alignSegmentTimesToKeyframes, shuffleSegments, clearSegments, toggleSegmentsList, toggleStreamsSelector, extractAllStreams, convertFormatBatch, concatBatch, toggleCaptureFormat, toggleStripAudio, toggleStripVideo, toggleStripSubtitle, toggleStripThumbnail, toggleStripAll, toggleDarkMode, askStartTimeOffset, deselectAllSegments, selectAllSegments, selectOnlyCurrentSegment, editCurrentSegmentTags, toggleCurrentSegmentSelected, invertSelectedSegments, removeSelectedSegments, tryFixInvalidDuration, tryDecimate, shiftAllSegmentTimes, toggleMuted, copySegmentsToClipboard, handleShowStreamsSelectorClick, openFilesDialog, openDirDialog, toggleSettings, detectBlackScenes, detectSilentScenes, detectSceneChanges, readAllKeyframes, createSegmentsFromKeyframes, toggleWaveformMode, toggleShowThumbnails, toggleShowKeyframes, showIncludeExternalStreamsDialog, toggleFullscreenVideo, selectAllMarkers, selectSegmentsByLabel, selectSegmentsByExpr, labelSelectedSegments, mutateSegmentsByExpr, toggleKeyboardShortcuts, generateOverviewWaveform, checkFileOpened, cutSegments, seekRel, keyboardSeekAccFactor, togglePlay, play, userChangePlaybackRate, goToTimecode, keyboardNormalSeekSpeed, keyboardSeekSpeed2, keyboardSeekSpeed3, seekRelPercent, seekClosestKeyframe, shortStep, jumpSeg, zoomRel, batchFileJump, removeSegment, currentSegIndexSafe, cutSegmentsHistory, labelSegment, onExportPress, userHtml5ifyCurrentFile, toggleKeyframeCut, applyEnabledStreamsFilter, setPlaybackVolume, commandedTimeRef, closeFileWithConfirm, openSendReportDialogWithState]);
+  }, [togglePlaySelectedSegments, toggleLoopSelectedSegments, pause, timelineToggleComfortZoom, captureSnapshot, captureSnapshotAsCoverArt, captureSnapshotToClipboard, setCutStart, setCutEnd, cleanupFilesDialog, splitCurrentSegment, focusSegmentAtCursor, selectSegmentsAtCursor, increaseRotation, jumpCutStart, jumpCutEnd, jumpTimelineStart, jumpTimelineEnd, batchOpenSelectedFile, closeBatch, addSegment, duplicateCurrentSegment, toggleLastCommands, extractCurrentSegmentFramesAsImages, extractSelectedSegmentsFramesAsImages, reorderSegsByStartTime, invertAllSegments, fillSegmentsGaps, combineOverlappingSegments, combineSelectedSegments, createFixedDurationSegments, createNumSegments, createFixedByteSizedSegments, createRandomSegments, alignSegmentTimesToKeyframes, shuffleSegments, clearSegments, toggleSegmentsList, toggleStreamsSelector, extractAllStreams, convertFormatBatch, concatBatch, toggleCaptureFormat, toggleStripAudio, toggleStripVideo, toggleStripSubtitle, toggleStripThumbnail, toggleStripAll, toggleDarkMode, askStartTimeOffset, deselectAllSegments, selectAllSegments, selectOnlyCurrentSegment, editCurrentSegmentTags, toggleCurrentSegmentSelected, invertSelectedSegments, removeSelectedSegments, tryFixInvalidDuration, tryDecimate, renameCurrentFile, shiftAllSegmentTimes, toggleMuted, copySegmentsToClipboard, handleShowStreamsSelectorClick, openFilesDialog, openDirDialog, toggleSettings, detectBlackScenes, detectSilentScenes, detectSceneChanges, readAllKeyframes, createSegmentsFromKeyframes, toggleWaveformMode, toggleShowThumbnails, toggleShowKeyframes, showIncludeExternalStreamsDialog, toggleFullscreenVideo, selectAllMarkers, selectSegmentsByLabel, selectSegmentsByExpr, labelSelectedSegments, mutateSegmentsByExpr, toggleKeyboardShortcuts, generateOverviewWaveform, checkFileOpened, cutSegments, seekRel, keyboardSeekAccFactor, togglePlay, play, userChangePlaybackRate, goToTimecode, keyboardNormalSeekSpeed, keyboardSeekSpeed2, keyboardSeekSpeed3, seekRelPercent, seekClosestKeyframe, shortStep, jumpSeg, zoomRel, batchFileJump, removeSegment, currentSegIndexSafe, cutSegmentsHistory, labelSegment, onExportPress, userHtml5ifyCurrentFile, toggleKeyframeCut, applyEnabledStreamsFilter, setPlaybackVolume, commandedTimeRef, closeFileWithConfirm, openSendReportDialogWithState]);
 
   const getKeyboardAction = useCallback((action: MainKeyboardAction) => mainActions[action], [mainActions]);
 
@@ -2238,6 +2350,11 @@ function App() {
   useEffect(() => {
     ipcRenderer.send('setAskBeforeClose', askBeforeClose && isFileOpened);
   }, [askBeforeClose, isFileOpened]);
+
+  useEffect(() => {
+    // Menu items that only apply to the open media file are disabled until one is loaded
+    ipcRenderer.send('setIsFileOpened', isFileOpened);
+  }, [isFileOpened]);
 
   const extractSingleStream = useCallback(async (index: number) => {
     if (!filePath) return;
@@ -2590,6 +2707,7 @@ function App() {
                         onDoubleClick={toggleFullscreenVideo}
                         onFocusCapture={onVideoFocus}
                         onSeeked={onSeeked}
+                        onLoadedMetadata={onLoadedMetadata}
                       >
                         {renderSubtitles()}
                       </video>

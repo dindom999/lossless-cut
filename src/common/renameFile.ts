@@ -19,6 +19,9 @@ export type NewBaseNameProblem =
 // https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions
 const windowsReservedNames = new Set(['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9']);
 
+// Matches `maxFileNameLength` in the renderer, which the output file name template uses for the same reason
+const maxFileNameLength = 250;
+
 // Characters that cannot appear in a base name on any platform, because a rename must not move the file
 // to a different directory (and on Windows they are separators anyway).
 const pathSeparators = ['/', '\\'];
@@ -50,15 +53,17 @@ const isWindowsReservedName = (name: string) => {
  * Why `newBaseName` cannot be used as the media file's new base name, or `undefined` if it is fine.
  * The extension is not part of the input and is never validated: a rename cannot change it.
  */
-export function validateNewBaseName({ newBaseName, currentBaseName, isWindows, isMac, maxLength = 250 }: {
+export function validateNewBaseName({ newBaseName, currentBaseName, isWindows, isMac }: {
   newBaseName: string,
   currentBaseName: string,
   isWindows: boolean,
   isMac: boolean,
-  maxLength?: number,
 }): NewBaseNameProblem | undefined {
   if (newBaseName.trim() === '') return 'empty';
   if (newBaseName === currentBaseName) return 'sameAsCurrent';
+
+  // `.` and `..` are directory references on every platform, so a media file can never be named one
+  if (newBaseName === '.' || newBaseName === '..') return 'reservedName';
 
   const invalidChars = getInvalidChars({ isWindows, isMac });
   if ([...newBaseName].some((char) => invalidChars.has(char))) return 'invalidChars';
@@ -66,7 +71,7 @@ export function validateNewBaseName({ newBaseName, currentBaseName, isWindows, i
   // File names cannot end in a space or dot on windows
   if (isWindows && /[\s.]$/.test(newBaseName)) return 'trailingDotOrWhitespace';
 
-  if (newBaseName.length > maxLength) return 'tooLong';
+  if (newBaseName.length > maxFileNameLength) return 'tooLong';
 
   if (isWindows && isWindowsReservedName(newBaseName)) return 'reservedName';
 
@@ -77,16 +82,9 @@ export function validateNewBaseName({ newBaseName, currentBaseName, isWindows, i
 export const getRenamedFileName = ({ newBaseName, ext }: { newBaseName: string, ext: string }) => `${newBaseName}${ext}`;
 
 /**
- * The auto-saved project file's file name for a media file with this base name. A project file is named
- * after the media file it describes, so renaming the media file means the project file has to move too,
- * or it is left behind describing a file that no longer exists. See `GLOSSARY.md` under "Project file".
- */
-export const getProjectFileName = ({ baseName, projectSuffix = 'proj.llc' }: { baseName: string, projectSuffix?: string }) => `${baseName}-${projectSuffix}`;
-
-/**
  * The project file's file name after its media file is renamed, e.g. `Beach Trip-proj.llc` becomes
- * `My Vacation-proj.llc`. Derived from the current name so that a project file stored in the working
- * directory keeps its suffix while following the media file.
+ * `My Vacation-proj.llc`. Derived from the current name rather than rebuilt from the new base name, so
+ * that a project file stored in the working directory keeps whatever suffix it actually has.
  */
 export function getRenamedProjectFileName({ projectFileName, currentBaseName, newBaseName }: {
   projectFileName: string,

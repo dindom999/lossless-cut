@@ -409,10 +409,10 @@ export function useDialog() {
 
       return (
         <Dialog.Content aria-describedby={undefined} style={{ width: '50vw' }}>
-          <Dialog.Title>{t('Rename file')}</Dialog.Title>
+          <Dialog.Title>{t('Rename media file')}</Dialog.Title>
 
           <Dialog.Description>
-            {t('This renames the file on disk from {{currentFileName}} to the name below, keeping its extension. Your project file will be renamed to match, and future exports will use the new name.', { currentFileName })}
+            {t('This renames the media file on disk from {{currentFileName}} to the name below, keeping its extension. Your project file will be renamed to match, and future exports will use the new name, since the {{FILENAME}} template variable follows the file name.', { currentFileName })}
           </Dialog.Description>
 
           <form onSubmit={handleSubmit}>

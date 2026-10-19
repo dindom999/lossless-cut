@@ -339,10 +339,6 @@ export function escapeRegExp(str: string) {
 
 export const readFileStats = async (path: string) => stat(path);
 
-export async function fileExists(path: string) {
-  return access(path).then(() => true, () => false);
-}
-
 export const readFileSize = async (path: string) => (await readFileStats(path)).size;
 
 export const readFileSizes = (paths: string[]) => pMap(paths, async (path) => readFileSize(path), { concurrency: 5 });

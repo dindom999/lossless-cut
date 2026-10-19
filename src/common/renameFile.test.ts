@@ -1,7 +1,7 @@
 // eslint-disable-next-line import/no-extraneous-dependencies
 import { describe, expect, test } from 'vitest';
 
-import { getProjectFileName, getRenamedFileName, getRenamedProjectFileName, renameLlcProjectMediaFileName, validateNewBaseName } from './renameFile.js';
+import { getRenamedFileName, getRenamedProjectFileName, renameLlcProjectMediaFileName, validateNewBaseName } from './renameFile.js';
 
 describe('getRenamedFileName', () => {
   test('replaces only the base name, keeping the extension', () => {
@@ -81,6 +81,14 @@ describe('validateNewBaseName', () => {
     expect(validateNewBaseName({ ...valid, newBaseName: 'a'.repeat(200) })).toBeUndefined();
   });
 
+  test('rejects the directory references, on every platform', () => {
+    // `.` and `..` would turn the rename into a move into the parent directory
+    for (const platform of [{ isWindows: true, isMac: false }, { isWindows: false, isMac: false }, { isWindows: false, isMac: true }]) {
+      expect(validateNewBaseName({ ...valid, ...platform, newBaseName: '.' })).toBe('reservedName');
+      expect(validateNewBaseName({ ...valid, ...platform, newBaseName: '..' })).toBe('reservedName');
+    }
+  });
+
   test('rejects windows reserved device names', () => {
     for (const reserved of ['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'LPT9']) {
       expect(validateNewBaseName({ ...valid, isWindows: true, isMac: false, newBaseName: reserved })).toBe('reservedName');
@@ -94,12 +102,6 @@ describe('validateNewBaseName', () => {
 
   test('does not reserve those names on other platforms', () => {
     expect(validateNewBaseName({ ...valid, isWindows: false, isMac: true, newBaseName: 'CON' })).toBeUndefined();
-  });
-});
-
-describe('getProjectFileName', () => {
-  test('names the project file after the media file', () => {
-    expect(getProjectFileName({ baseName: 'Beach Trip' })).toBe('Beach Trip-proj.llc');
   });
 });
 

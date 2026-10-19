@@ -88,7 +88,6 @@ import {
   calculateTimelinePercent,
   getFileDir,
   renameWithRetry,
-  fileExists,
   isWindows,
   isMac,
 } from './util';
@@ -1816,8 +1815,8 @@ function App() {
     const newFileName = getRenamedFileName({ newBaseName, ext: extname(filePath) });
     const newFilePath = pathJoin(dirname(filePath), newFileName);
 
-    if (await fileExists(newFilePath)) {
-      errorToast(i18n.t('A file with that name already exists'));
+    if (await mainApi.pathExists(newFilePath)) {
+      errorToast(i18n.t('A media file with that name already exists'));
       return;
     }
 
@@ -1841,7 +1840,7 @@ function App() {
     let renamed = false;
 
     try {
-      setWorking({ text: i18n.t('Renaming file') });
+      setWorking({ text: i18n.t('Renaming media file') });
 
       // Release the file before asking the OS to move it. The <video> element and the ffmpeg process
       // that feeds it both hold a handle open, and Windows refuses to rename a file that is open.
@@ -1858,36 +1857,43 @@ function App() {
       await new Promise((resolve) => { setTimeout(resolve, 100); });
 
       await withErrorHandling(async () => {
-        // Persist the segments before the reload resets them. This happens even when auto-save is
-        // off, because silently losing the user's cuts would be far worse than leaving behind a project
-        // file they didn't ask for.
-        if (cutSegments.length > 0) await saveLlcProject({ savePath: newProjectFilePath, mediaFilePath: newFilePath, cutSegments });
-
+        // Flip as soon as the file has actually moved, so that a failure after this point still knows
+        // the media file is no longer at its old path.
         await renameWithRetry(filePath, newFilePath);
+        renamed = true;
 
+        // Every project file for this media file has to move, including the one in the source
+        // directory: leaving the old one behind would strand it pointing at a media file that no
+        // longer exists. This runs before saving below, because the file in the source directory
+        // renames to the same path we'd save to, and rewriting it after would put the old
+        // (possibly empty) segments back.
         for (const oldProjectFilePath of oldProjectFilePaths) {
-          // Skip the one we just wrote, and any that don't exist — the user may have segments stored
-          // in only one of the two locations, or none at all.
-          if (oldProjectFilePath !== sourceDirProjectFilePath && await fileExists(oldProjectFilePath)) {
+          // The user may have project files in only one of the two locations, or none at all
+          if (await mainApi.pathExists(oldProjectFilePath)) {
             await rewriteLlcProjectMediaFileName(oldProjectFilePath, newFileName);
             await renameWithRetry(oldProjectFilePath, renameProjectFilePath(oldProjectFilePath));
           }
         }
 
+        // Persist the segments before the reload resets them. This happens even when auto-save is
+        // off, because silently losing the user's cuts would be far worse than leaving behind a project
+        // file they didn't ask for.
+        if (cutSegments.length > 0) await saveLlcProject({ savePath: newProjectFilePath, mediaFilePath: newFilePath, cutSegments });
+
         // `projectPath` is what makes loadMedia read the cut segments back out of the project file. Only
         // pass it when there is one: a path to a project file that doesn't exist would fail the load.
-        await loadMedia({ filePath: newFilePath, projectPath: await fileExists(newProjectFilePath) ? newProjectFilePath : undefined });
+        await loadMedia({ filePath: newFilePath, projectPath: await mainApi.pathExists(newProjectFilePath) ? newProjectFilePath : undefined });
 
-        renamed = true;
         showNotification({ icon: 'info', text: i18n.t('Renamed to {{newFileName}}', { newFileName }) });
-      }, i18n.t('Failed to rename file'));
+      }, i18n.t('Failed to rename media file'));
     } finally {
       setWorking(undefined);
     }
 
-    // Seeking has to wait for the new file's metadata, so hand the position over rather than seeking
-    // now. Only when the rename actually happened — otherwise the next file to load would be seeked.
-    if (renamed) pendingSeekRef.current = timeBeforeRename;
+    if (renamed) {
+      // Seeking has to wait for the new file's metadata, so hand the position over rather than seeking now
+      pendingSeekRef.current = timeBeforeRename;
+    }
   }, [checkFileOpened, workingRef, filePath, openRenameFileDialog, getProjectFileSavePath, cutSegments, withErrorHandling, loadMedia, getRelevantTime, showNotification, setWorking, videoRef]);
 
   const addStreamSourceFile = useCallback(async (path: string) => {

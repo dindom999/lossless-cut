@@ -19,5 +19,7 @@ node_modules
 /app*.log
 /main-ts-dist
 /common-ts-dist
+/.workbuddy
+/.scratch
 
 tsconfig.*.tsbuildinfo
